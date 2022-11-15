@@ -1,0 +1,15 @@
+data:
+  dataDir: "/home/brown/Documents/PaperImplementations/datasets/coco"
+  dataType: "train2014"
+
+
+
+network:
+  sliding_window: 3
+  stride: 3
+  n_proposals: 9
+  iou_pos_threshold: 0.7
+  iou_neg_threshold: 0.3
+  base_anchor_size: 1
+  roi_output_size: 7
+  
