@@ -1,0 +1,10 @@
+- numpy
+- pandas
+- pytorch-lightning
+- fiftyone # for visualization
+- cocoapi # from the github repository # https://stackoverflow.com/questions/56690223/ubuntu-18-04-lts-install-cocoapi (it was helpful for the installation)
+- cython3 # for cocoapi
+
+# general comments
+# roi_pool: https://discuss.pytorch.org/t/pytorch-roi-pooling-implementation-deviation/21507 , https://pytorch.org/vision/main/generated/torchvision.ops.roi_pool.html 
+# https://towardsdatascience.com/faster-r-cnn-for-object-detection-a-technical-summary-474c5b857b46
