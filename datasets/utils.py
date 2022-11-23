@@ -26,9 +26,14 @@ def associate_anchor_with_gt_bbox(anchors, bbox, label_bbox, iou_pos_threshold, 
       
         # TODO: check the iou calculation to make sure that it's working well
 
-        y_anchors = torch.zeros(anchors.shape[0], 2)*(-1) # initialize with -1 values
+        # transform bbox to format of anchors (x_c, y_c, w, h)
+        bbox = from_coco_format_to_anchor_format(bbox)
+
+        y_anchors = torch.zeros(anchors.shape[0], 2) # initialize with -1 values *(-1)
 
         bbox_anchors = torch.zeros(anchors.shape)
+
+        obj_label_anchors = torch.zeros(anchors.shape[-2], label_bbox.shape[-1])
 
         # label positive anchors
          
@@ -40,22 +45,23 @@ def associate_anchor_with_gt_bbox(anchors, bbox, label_bbox, iou_pos_threshold, 
 
         idx_respect_threshold_anchors = idx_respect_threshold[:, 0]
         label_box_respect_threshold = bbox[idx_respect_threshold[:, 1], :]
-
-        # print(label_box_respect_threshold.shape)
-        # print("*"*30)
+        
 
         y_anchors[idx_respect_threshold_anchors,1] = 1
         y_anchors[idx_max,1] = 1
 
-        if idx_respect_threshold.shape[0] != 0:
-            bbox_anchors[idx_respect_threshold,:] = label_box_respect_threshold
+        obj_label_anchors[idx_respect_threshold_anchors,:] = label_bbox[idx_respect_threshold[:,1],:]
+        obj_label_anchors[idx_max,:] = label_bbox
+
+        # if idx_respect_threshold.shape[0] != 0:
+        bbox_anchors[idx_respect_threshold_anchors,:] = label_box_respect_threshold
         bbox_anchors[idx_max] = label_box_max
 
         # assign object labels to positive anchors for the detection part (Fast RCNN)
-        idx_pos = torch.cat((idx_respect_threshold_anchors, idx_max)).unique()
+        # idx_pos = torch.cat((idx_respect_threshold_anchors, idx_max)).unique()
         
-        label_pos_anchors = torch.zeros((idx_pos.shape[0], label_bbox.shape[1]))
-        label_pos_anchors[range(idx_respect_threshold_anchors.shape[0]),:] = label_bbox[idx_respect_threshold[:, 1], :]
+        # label_pos_anchors = torch.zeros((idx_pos.shape[0], label_bbox.shape[1]))
+        # label_pos_anchors[range(idx_respect_threshold_anchors.shape[0]),:] = label_bbox[idx_respect_threshold[:, 1], :]
         # TODO: how to consider the other indexes where we use the maximum? (need to find the except btw the index tensors)
 
 
@@ -64,9 +70,10 @@ def associate_anchor_with_gt_bbox(anchors, bbox, label_bbox, iou_pos_threshold, 
         idx_neg_anchors = (ious < iou_neg_threshold).nonzero()[:,0]
         y_anchors[idx_neg_anchors,0] = 1
 
+        # indices of positive anchors
+        idx_pos = torch.cat((idx_max, idx_respect_threshold_anchors)).unique()
 
-
-        return bbox_anchors, y_anchors, label_pos_anchors
+        return idx_pos, bbox_anchors, y_anchors, obj_label_anchors
 
 
 
@@ -157,7 +164,6 @@ def to_right_box_format(boxes):
 
 def from_coco_format_to_right(boxes):
     # transform box format from (x_min, y_min, w, h) to (x1, y1, x2, y2)
-    print(boxes.shape)
     new_boxes = torch.zeros(boxes.shape)
     new_boxes[:,0] = boxes[:,0]
     new_boxes[:,1] = boxes[:,1]
@@ -166,13 +172,35 @@ def from_coco_format_to_right(boxes):
     
     return new_boxes
 
+def from_coco_format_to_anchor_format(boxes):
+    # args (boxes) in format (x1,y1,w,h) -- (x_c,y_c,w,h)
+    new_boxes = torch.zeros(boxes.shape)
+    new_boxes[:,0] = boxes[:,0] + torch.div(boxes[:,2], 2)
+    new_boxes[:,1] = boxes[:,1] + torch.div(boxes[:,3], 2)
+    new_boxes[:,2] = boxes[:,2] + boxes[:,2]
+    new_boxes[:,3] = boxes[:,3] + boxes[:,3]
+    
+    return new_boxes
+
 # TODO: these information must be calculated using the dataset directly and not this way
+
 def min_max_scaler_anchors_with_image(img_shape, to_scale_anchors):
     height, width = img_shape
     min_cor_anchors = torch.tensor([0.5, 0.5, 0, 0])
     max_cor_anchors = torch.tensor([width-0.5, height-0.5, width, height])
     
     scaled_anchors = torch.zeros(to_scale_anchors.shape)
-    scaled_anchors = (to_scale_anchors - min_cor_anchors) / (max_cor_anchors - min_cor_anchors)
+    scaled_anchors = ((to_scale_anchors - min_cor_anchors) / (max_cor_anchors - min_cor_anchors))
+    scaled_anchors = 2*scaled_anchors - 1
     
     return scaled_anchors
+
+def unscale_min_max_anchors(img_shape, anchors):
+    height, width = img_shape
+    min_cor_anchors = torch.tensor([0.5, 0.5, 0, 0])
+    max_cor_anchors = torch.tensor([width-0.5, height-0.5, width, height])
+
+    anchors = (anchors + 1) / 2
+    anchors = anchors* (max_cor_anchors - min_cor_anchors) + min_cor_anchors
+
+    return anchors

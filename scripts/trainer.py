@@ -43,19 +43,21 @@ def main(argv):
         # network_config["window_size"], network_config["stride"]
     )
 
-    train_loader = DataLoader(dataset)
+    train_loader = DataLoader(dataset, batch_size=1,)
 
     # model = RegionProposalNetwork(
     #     in_channels=3, sliding_window= network_config["window_size"],
     #     stride=network_config["stride"], n_proposals=network_config["n_proposals"]
     # )
 
+    # TODO: automatically have the number of classes in COCO (Maybe config file?)
+
     model = FasterRCNN(
         network_config["sliding_window"], network_config["stride"],
-        network_config["roi_output_size"]  
+        network_config["roi_output_size"], n_classes=80  
     )
 
-    trainer = pl.Trainer(limit_train_batches=5, max_epochs=1)
+    trainer = pl.Trainer(limit_train_batches=2, max_epochs=2, log_every_n_steps=1)
     trainer.fit(model = model, train_dataloaders= train_loader)
 
 

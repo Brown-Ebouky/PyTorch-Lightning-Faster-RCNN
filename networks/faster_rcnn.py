@@ -3,26 +3,28 @@ import os
 import torch
 from torch import optim, nn, utils, Tensor
 from torchvision.transforms import ToTensor
-from torchvision.ops import box_iou
+from torchvision.ops import box_iou, roi_pool, RoIPool
 from torchvision import models
 import pytorch_lightning as pl
-from datasets.utils import to_right_box_format, create_anchors, associate_anchor_with_gt_bbox, min_max_scaler_anchors_with_image
+from datasets.utils import to_right_box_format, create_anchors, associate_anchor_with_gt_bbox, min_max_scaler_anchors_with_image, unscale_min_max_anchors
+from losses.__init__ import RPNLoss, DetectionLoss
 
 
 # TODO: define the loss function to use
 # use appropriately the different classes
 
 class FasterRCNN(pl.LightningModule):
-    def __init__(self, sliding_window, stride, roi_output_size, n_proposals = 9, pos_threshold = 0.7, neg_threshold = 0.3):
+    def __init__(self, sliding_window, stride, roi_output_size, n_classes, n_proposals = 9, pos_threshold = 0.7, neg_threshold = 0.3):
         super().__init__()
         self.cnn_backbone = models.vgg16(pretrained=True).features
 
         # TODO: find a way to know the in_channels automatically
         # the current value has been obtained by printing the backbone model
-        
-        self.rpn_network = RegionProposalNetwork(in_channels=512, sliding_window=sliding_window, stride=stride, n_proposals=n_proposals)
-        self.detector = FastRegionCNN(roi_output_size=roi_output_size, n_proposals=n_proposals)
+        self.in_channels = 512
+        self.rpn_network = RegionProposalNetwork(in_channels=self.in_channels, sliding_window=sliding_window, stride=stride, n_proposals=n_proposals)
+        self.detector = FastRegionCNN(in_channels=self.in_channels, roi_output_size=roi_output_size, n_classes=n_classes)
         self.rpn_loss = RPNLoss()
+        self.detection_loss = DetectionLoss()
 
         self.pos_threshold = pos_threshold
         self.neg_threshold = neg_threshold
@@ -48,51 +50,48 @@ class FasterRCNN(pl.LightningModule):
         
         # calculate ground truth box coordinates and fg labels
         anchors = create_anchors(z.shape[-2], z.shape[-1], w_size=self.sliding_window, stride=self.stride)
-        coor_bbox_anchors, label_bg_anchors, label_pos_anchors = associate_anchor_with_gt_bbox(anchors, bboxes, class_bboxes, self.pos_threshold, self.neg_threshold)
+        idx_pos, coor_bbox_anchors, label_bg_anchors, label_pos_anchors = associate_anchor_with_gt_bbox(anchors, bboxes, class_bboxes, self.pos_threshold, self.neg_threshold)
 
 
         # TODO:normalize value of the coordinates of bboxes before calculating the loss function
         # we scale the anchors (gt, predictions) coordinates using the image shape
-        anchors = min_max_scaler_anchors_with_image(im.shape[-2:], anchors)
-        coor_bbox_anchors = min_max_scaler_anchors_with_image(im.shape[-2:], coor_bbox_anchors)
-
+        # anchors = min_max_scaler_anchors_with_image(im.shape[-2:], anchors)
+        # coor_bbox_anchors = min_max_scaler_anchors_with_image(im.shape[-2:], coor_bbox_anchors)
+        
         # calculate rpn loss
-        loss = self.rpn_loss((prob_props, coor_props), (label_bg_anchors, coor_bbox_anchors), anchors)
-        self.log("train_loss", loss)
+        rpn_loss = self.rpn_loss((prob_props, coor_props), (label_bg_anchors, coor_bbox_anchors), anchors)
+        self.log("train_rpn_loss", rpn_loss)
 
         # apply the detection network on the proposals from rpn
-        
+        # print(torch.argmax(p_pred, dim=-1)) /// TAKE ONLY POSITIVE proposals? HOW ?? Thresholding probabilities?
+        # pos_pred_inds = (label_bg_anchors[:,1] == 1).nonzero()[:,0]
 
-        # transform the predictions into the right format (x1,y1,x2,y2)
-        # pred_boxes = to_right_box_format(pred_boxes)
+        detect_loss = torch.zeros(1)
 
-        # pred_ious = box_iou(pred_boxes, y)
-        # inds_thre = (pred_ious >= self.threshold).nonzero()[:,1] #0
-        # inds_max = torch.argmax(pred_ious, dim=0)
+        # we consider the positive proposals for the detection
+        for i in idx_pos:
+            # TODO:check these values during training, the results are strange (TOO SMALL, WHY??)
+            # print(coor_props[i])
+            # unscaled_props = unscale_min_max_anchors(z.shape[-2:], coor_props[i])
+            unscaled_props = coor_props[i].reshape(1,-1)
+            # print("\n")
+            print(unscaled_props)
 
-        # assert inds_thre.size() ==  inds_max.size()
+            roi_probs, roi_regs = self.detector((z, [unscaled_props])) # List(bbox) to satisfy the format for roi_pool
+            gt_roi_prob = label_pos_anchors[i].reshape(1, -1)
+            gt_roi_reg = coor_bbox_anchors[i]
 
-        # inds = torch.cat((inds_thre, inds_max)).unique()
+            # calculate the fast rcnn loss / detection loss
+            roi_loss = self.detection_loss((roi_probs, roi_regs), (gt_roi_prob, gt_roi_reg))
+            detect_loss = torch.add(detect_loss, roi_loss)
+            
+        print("\*"*30 + "\n")
+        print(rpn_loss, detect_loss)
 
-        # construct ground truth values for the proposals using the indices
-        # gt_probs = torch.zeros(probs.size())
-        # gt_probs[inds] = 1
-
-
-
-        # perform the roi pooling by using the proposals predicted as positive
-        # for loop ??
-        # for i in inds:
-        #     x1, y1, x2, y2 = pred_boxes[i]
-        #     roi = z[y1:y2, x1:x2]
-        #     prob_roi, reg_roi = self.detector(roi)
-
-            # calculate loss
-        
-        return loss
+        return torch.add(rpn_loss, detect_loss)
 
     def configure_optimizers(self):
-        optimizer = optim.Adam(self.parameters(), lr=1e-3)
+        optimizer = optim.SGD(self.parameters(), lr=1e-3)
         return optimizer
 
 
@@ -134,81 +133,46 @@ class RegionProposalNetwork(nn.Module):
 
 
 class FastRegionCNN(nn.Module):
-    def __init__(self, roi_output_size, n_proposals) -> None:
+    def __init__(self, in_channels, roi_output_size, n_classes) -> None:
         super().__init__()
         
         # flatten somewhere ??
         # there's already a roi pooling layer
+        self.n_classes = n_classes
+        self.roi_pool = RoIPool(roi_output_size, spatial_scale=1.0) # MAYBE Change the scale factor regarding to the size of the feature map
         self.roi_layer = nn.AdaptiveMaxPool2d((roi_output_size, roi_output_size))
         self.mid_layer = nn.Sequential(
-            nn.Linear(roi_output_size*roi_output_size, 512),
+            nn.Flatten(),
+            nn.Linear(in_channels*roi_output_size*roi_output_size, 4096),
             nn.ReLU(),
-            nn.Linear(512, 1024),
+            nn.Linear(4096, 4096),
             nn.ReLU(),
-            nn.Linear(1024, 512),
-            nn.ReLU(),
-            nn.Linear(512, 256),
-            nn.ReLU()
+            # nn.Linear(1024, 512),
+            # nn.ReLU(),
+            # nn.Linear(512, 256),
+            # nn.ReLU()
         )
         self.cls_layer = nn.Sequential(
-            nn.Linear(256, 2*n_proposals),
+            nn.Linear(4096, n_classes),
             nn.Softmax()
         )
-        self.reg_layer = nn.Linear(256, 4*n_proposals)
+        self.reg_layer = nn.Linear(4096, 4*n_classes)
 
 
     def forward(self, x):
-        x = self.roi_layer(x)
+        # x = self.roi_layer(x)
+        feature_map, boxes = x
+        x = self.roi_pool(feature_map, boxes)
+        # x = nn.Flatten(x) # flatten x to have 2 dim vector which can be processed by linear layers
+
         x = self.mid_layer(x)
+        
         probs = self.cls_layer(x)
+
         regs = self.reg_layer(x)
+        regs = regs.view(-1, self.n_classes, 4)
+
         return probs, regs
 
 
 
-class RPNLoss(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.epsilon_log = 1e-5
-
-    def forward(self, x_pred, x_gt, anchors):
-        return self.region_loss(x_pred, x_gt, anchors)
-
-    def region_loss(self, x_pred, x_gt, anchors):
-        """
-        Desc: calculate the region proposal loss function
-
-        Args:
-            x_pred: prediction data containing the probabilities bg/fg and coordinates of proposals
-            x_gt: ground truth probabilities and coordinates
-            anchors: anchor associated with each prediction
-        """
-        p_pred, t_pred = x_pred
-        p_gt, t_gt = x_gt
-        
-        n_anchors, _ = p_pred.shape
-        p_loss = torch.sum(nn.CrossEntropyLoss()(p_pred, p_gt)) / n_anchors
-
-
-        t_x = torch.div(torch.sub(t_pred[:, 0], anchors[:, 0]), anchors[:, 2]).reshape(-1,1)
-        t_y = torch.div(torch.sub(t_pred[:, 1], anchors[:, 1]), anchors[:, 3]).reshape(-1,1)
-        t_w = torch.log(torch.abs(torch.div(t_pred[:, 2], anchors[:, 2])) + self.epsilon_log).reshape(-1,1)
-        t_h = torch.log(torch.abs(torch.div(t_pred[:, 3], anchors[:, 3])) + self.epsilon_log).reshape(-1,1)
-
-        t_x_star = torch.div(torch.sub(t_gt[:, 0], anchors[:, 0]), anchors[:, 2]).reshape(-1,1)
-        t_y_star = torch.div(torch.sub(t_gt[:, 1], anchors[:, 1]), anchors[:, 3]).reshape(-1,1)
-        t_w_star = torch.log(torch.abs(torch.div(t_gt[:, 2], anchors[:, 2])) + self.epsilon_log).reshape(-1,1)
-        t_h_star = torch.log(torch.abs(torch.div(t_gt[:, 3], anchors[:, 3])) + self.epsilon_log).reshape(-1,1)
-
-        t_glob = torch.cat((t_x, t_y, t_w, t_h), dim=1)
-        t_glob_star = torch.cat((t_x_star, t_y_star, t_w_star, t_h_star), dim=1)
-
-        
-        # print(t_glob_star)
-        reg_loss = nn.functional.smooth_l1_loss(t_glob, t_glob_star)
-        
-        print(reg_loss)
-        print("\\"*30)
-
-        # TODO: add the lambda coefficient on the reg loss 
-        return torch.add(p_loss, reg_loss)
